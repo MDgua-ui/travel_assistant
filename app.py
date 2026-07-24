@@ -2,11 +2,25 @@ from flask import Flask, request, jsonify, render_template
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 import os
+import sys
 import requests
 import json
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 爬虫模块
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from scraper import (
+    TravelDataEnricher,
+    TravelDataStore,
+    get_data_store,
+    get_real_data_provider,
+    run_async_enrich,
+    MafengwoCrawler,
+    CtripCrawler,
+    BaseCrawler,
+)
 
 app = Flask(__name__)
 
@@ -15,6 +29,24 @@ logger = logging.getLogger(__name__)
 
 places_cache = {}
 cache_expire_time = 3600
+
+# 旅游数据存储与增强器
+travel_store = get_data_store()
+data_enricher = None  # 懒加载
+
+def get_enricher():
+    """获取数据增强器（懒加载）"""
+    global data_enricher
+    if data_enricher is None:
+        data_enricher = TravelDataEnricher()
+    return data_enricher
+
+def get_provider_with_llm():
+    """获取带LLM的真实数据提供器"""
+    provider = get_real_data_provider()
+    if provider.llm is None:
+        provider.llm = llm
+    return provider
 
 llm = ChatOpenAI(
     model="kimi-k2.7-code-highspeed",
@@ -273,6 +305,365 @@ def search_around():
         logger.error(f"周边搜索异常: location={location}, error={str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/enrich_city', methods=['POST'])
+def enrich_city():
+    """
+    为城市采集和整合多源旅游数据
+    优先使用已验证知识库 → 尝试Wikipedia → 回退Crawl4AI爬虫
+    POST body: {"city": "北京", "force_refresh": false}
+    """
+    try:
+        data = request.get_json() or {}
+        city = data.get('city', '')
+        force_refresh = data.get('force_refresh', False)
+
+        if not city:
+            return jsonify({'error': '请输入城市名称'}), 400
+
+        logger.info(f"开始为 {city} 采集旅游数据...")
+
+        # 方案1: 使用 RealDataProvider（已验证知识库 + Wikipedia）
+        provider = get_provider_with_llm()
+        enriched = provider.build_enriched_prompt_data(city)
+
+        # 从存储中获取实际保存的数据
+        stored_guide = travel_store.get_guide(city)
+        stored_attractions = travel_store.get_attractions(city)
+
+        # 统计
+        attraction_count = len(stored_attractions)
+        has_guide = stored_guide is not None
+        food_count = len(enriched.get("food", []))
+
+        # 如果知识库没有这个城市，用LLM自动生成并永久缓存
+        if attraction_count == 0 and not provider.has_knowledge(city):
+            logger.info(f"知识库无{city}数据，调用LLM自动生成...")
+            try:
+                llm_prompt = f"""你是中国旅游专家。请为{city}生成结构化旅游数据(严格JSON格式)。
+
+只输出JSON:
+{{"attractions":[{{"name":"景点","type":"类型","rating":"评分","price":"门票","open_time":"时间","address":"地址","description":"简介"}}],"food":[{{"name":"餐厅","cuisine":"菜系","price":"人均","description":"简介"}}],"tips":"贴士"}}
+
+至少6个景点4个餐厅。数据必须真实。"""
+
+                from langchain_core.messages import HumanMessage
+                llm_response = llm.invoke([HumanMessage(content=llm_prompt)])
+                llm_text = llm_response.content if hasattr(llm_response, 'content') else str(llm_response)
+
+                import re
+                match = re.search(r'\{.*"attractions".*\}', llm_text, re.DOTALL)
+                if match:
+                    kb_entry = json.loads(match.group(0))
+                    provider.cache_llm_knowledge(city, kb_entry)
+
+                    # 保存到存储
+                    for attr in kb_entry.get("attractions", []):
+                        ac = attr.copy()
+                        ac["source"] = "llm_generated"
+                        travel_store.save_attraction(city, ac)
+                    if kb_entry.get("food"):
+                        travel_store.save_guide(city, {
+                            "city": city,
+                            "food_recommendations": kb_entry["food"],
+                            "tips": kb_entry.get("tips", ""),
+                            "source": "llm_generated",
+                        })
+
+                    stored_attractions = travel_store.get_attractions(city)
+                    attraction_count = len(stored_attractions)
+                    food_count = len(kb_entry.get("food", []))
+                    enriched["food"] = kb_entry.get("food", [])
+                    sources = ["llm_generated"]
+                    logger.info(f"LLM生成成功: {city} ({attraction_count}景点)")
+                else:
+                    sources = []
+            except Exception as e:
+                logger.warning(f"LLM生成失败: {e}")
+                sources = []
+        else:
+            sources = enriched.get("sources", [])
+
+        # 格式化attractions输出
+        attractions_out = []
+        for a in stored_attractions[:10]:
+            attractions_out.append({
+                "name": a.get("name", ""),
+                "rating": a.get("rating", ""),
+                "price": a.get("price", ""),
+                "source": a.get("source", enriched.get("sources", [""])[0] if enriched.get("sources") else ""),
+            })
+
+        # 格式化food输出
+        food_out = []
+        for f in enriched.get("food", [])[:5]:
+            food_out.append({
+                "name": f.get("name", ""),
+                "cuisine": f.get("cuisine", ""),
+                "price": f.get("price", ""),
+            })
+
+        return jsonify({
+            'success': True,
+            'city': city,
+            'stats': {
+                'attraction_count': attraction_count,
+                'food_count': food_count,
+                'has_guide': has_guide,
+                'data_sources': sources,
+            },
+            'attractions': attractions_out,
+            'food': food_out,
+            'sources': sources,
+        })
+
+    except Exception as e:
+        import traceback
+        logger.error(f"数据采集异常: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({'error': f'数据采集失败: {str(e)}'}), 500
+
+@app.route('/api/get_city_data', methods=['GET'])
+def get_city_data():
+    """
+    获取已存储的城市数据
+    GET: /api/get_city_data?city=北京
+    """
+    try:
+        city = request.args.get('city', '')
+        if not city:
+            return jsonify({'error': '请输入城市名称'}), 400
+
+        guide = travel_store.get_guide(city)
+        attractions = travel_store.get_attractions(city)
+        stats = travel_store.get_stats()
+
+        result = {
+            'city': city,
+            'has_guide': guide is not None,
+            'guide': guide,
+            'attractions': attractions[:15],
+            'total_attractions': len(attractions),
+            'data_stats': stats,
+        }
+
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"获取城市数据异常: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/crawl_url', methods=['POST'])
+def crawl_url():
+    """
+    通用网页爬取 + LLM智能分析 + 旅游数据提取
+    任意网址 → 爬取内容 → LLM判断是否旅游相关 → 提取结构化数据 → 保存
+    POST body: {"url": "https://...", "save_if_travel": true}
+    """
+    try:
+        data = request.get_json() or {}
+        url = data.get('url', '')
+        save_if_travel = data.get('save_if_travel', True)
+
+        if not url:
+            return jsonify({'error': '请输入URL'}), 400
+
+        # ==== 第一步：爬取网页内容 ====
+        logger.info(f"正在爬取: {url}")
+
+        raw_html = ""
+        page_title = ""
+        page_text = ""
+
+        # 方案A：用 requests + BeautifulSoup（轻量快速）
+        try:
+            resp = requests.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,*/*",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            }, timeout=15, allow_redirects=True)
+            raw_html = resp.text
+
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(raw_html, 'lxml')
+            page_title = soup.title.get_text(strip=True) if soup.title else ""
+
+            # 移除无用标签
+            for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
+                tag.decompose()
+            page_text = soup.get_text(separator='\n', strip=True)
+            # 清理多余空行
+            page_text = '\n'.join(line.strip() for line in page_text.split('\n') if line.strip())
+
+            logger.info(f"requests获取成功: {len(page_text)} 字符")
+        except Exception as req_err:
+            logger.warning(f"requests失败({req_err}), 尝试Crawl4AI...")
+            # 方案B：Crawl4AI(支持JS渲染)
+            try:
+                crawler = BaseCrawler("web", rate_limit=1.0)
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                result = loop.run_until_complete(
+                    crawler.fetch_page(url, cache_type="web", ttl=3600, extract_content=True)
+                )
+                loop.run_until_complete(crawler.close())
+                loop.close()
+
+                if result.get('success'):
+                    page_title = result.get('title', '')
+                    page_text = result.get('content', '') or result.get('cleaned_html', '')
+                    logger.info(f"Crawl4AI获取成功: {len(page_text)} 字符")
+                else:
+                    return jsonify({
+                        'success': False,
+                        'url': url,
+                        'error': '无法获取页面内容，该网站可能拒绝访问',
+                    }), 422
+            except Exception as c4e:
+                logger.error(f"Crawl4AI也失败: {c4e}")
+                return jsonify({
+                    'success': False,
+                    'url': url,
+                    'error': f'无法爬取该网页。可能原因：需要登录、反爬保护、网络限制',
+                }), 422
+
+        if not page_text or len(page_text) < 100:
+            return jsonify({
+                'success': False,
+                'url': url,
+                'error': '页面内容过少，可能为动态加载页面',
+            }), 422
+
+        # 截取合理长度（LLM上下文限制）
+        content_for_llm = page_text[:6000] if len(page_text) > 6000 else page_text
+
+        # ==== 第二步：LLM分析内容 ====
+        logger.info(f"LLM分析内容({len(content_for_llm)}字符)...")
+
+        analysis_prompt = f"""请分析以下网页内容，判断是否为旅游相关的内容。
+
+网页标题: {page_title}
+网页URL: {url}
+
+=== 网页内容 ===
+{content_for_llm}
+=== 内容结束 ===
+
+请按以下JSON格式回复（只输出JSON）：
+{{
+  "is_travel_related": true/false,
+  "relevance_score": 0-100,
+  "category": "景点介绍/攻略游记/美食推荐/酒店住宿/交通出行/文化活动/购物指南/旅游新闻/无关内容",
+  "related_cities": ["相关城市名"],
+  "summary": "100字以内的内容摘要",
+  "extracted_data": {{
+    "attractions": [{{"name": "景点名", "price": "门票", "description": "简介"}}],
+    "foods": [{{"name": "餐厅/美食名", "cuisine": "类型", "price": "价格", "description": "简介"}}],
+    "tips": "总结的实用贴士"
+  }}
+}}
+
+判断标准：
+- 景点介绍、旅游攻略、游记、美食探店、酒店测评、交通指南等 → is_travel_related=true
+- 与旅游无关的新闻、广告、技术文章等 → is_travel_related=false
+- 如果is_travel_related=false，extracted_data留空即可"""
+
+        from langchain_core.messages import HumanMessage
+        analysis_response = llm.invoke([HumanMessage(content=analysis_prompt)])
+        analysis_text = analysis_response.content if hasattr(analysis_response, 'content') else str(analysis_response)
+
+        # 解析LLM回复
+        import re as _re
+        analysis_json = None
+        json_match = _re.search(r'\{.*"is_travel_related".*\}', analysis_text, _re.DOTALL)
+        if json_match:
+            try:
+                analysis_json = json.loads(json_match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        if not analysis_json:
+            return jsonify({
+                'success': True,
+                'url': url,
+                'title': page_title,
+                'is_travel_related': False,
+                'summary': '无法分析页面内容',
+                'content_preview': content_for_llm[:500],
+            })
+
+        # ==== 第三步：如果是旅游内容，提取并保存 ====
+        is_travel = analysis_json.get('is_travel_related', False)
+        extracted = analysis_json.get('extracted_data', {})
+        related_cities = analysis_json.get('related_cities', [])
+
+        saved_count = 0
+        if is_travel and save_if_travel and extracted:
+            # 保存景点
+            for attr in extracted.get('attractions', []):
+                if attr.get('name'):
+                    attr['source'] = f'web_crawl:{url[:50]}'
+                    for city in (related_cities or ['网页爬取']):
+                        travel_store.save_attraction(city, attr)
+                        saved_count += 1
+
+            # 保存攻略数据
+            if extracted.get('foods') or extracted.get('tips'):
+                for city in (related_cities or ['网页爬取']):
+                    travel_store.save_guide(city, {
+                        'city': city,
+                        'food_recommendations': extracted.get('foods', []),
+                        'tips': extracted.get('tips', ''),
+                        'source': f'web_crawl:{url[:50]}',
+                        'page_title': page_title,
+                        'url': url,
+                    })
+                    saved_count += 1
+
+        # ==== 返回结果 ====
+        return jsonify({
+            'success': True,
+            'url': url,
+            'title': page_title,
+            'is_travel_related': is_travel,
+            'relevance_score': analysis_json.get('relevance_score', 0),
+            'category': analysis_json.get('category', '未知'),
+            'summary': analysis_json.get('summary', ''),
+            'related_cities': related_cities,
+            'extracted_data': {
+                'attractions': extracted.get('attractions', [])[:10],
+                'foods': extracted.get('foods', [])[:10],
+                'tips': extracted.get('tips', '')[:500],
+            } if is_travel else None,
+            'saved_count': saved_count,
+            'content_length': len(page_text),
+        })
+
+    except Exception as e:
+        import traceback
+        logger.error(f"爬取异常: {str(e)}\n{traceback.format_exc()}")
+        return jsonify({'error': f'爬取失败: {str(e)}'}), 500
+
+@app.route('/api/data_stats', methods=['GET'])
+def data_stats():
+    """获取数据统计信息"""
+    try:
+        stats = travel_store.get_stats()
+        stats_cities = stats.get('cities_covered', [])
+
+        import os
+        from scraper.config import ATTRACTIONS_DIR, GUIDES_DIR
+
+        attraction_files = [f for f in os.listdir(ATTRACTIONS_DIR) if f.endswith('.json')] if os.path.exists(ATTRACTIONS_DIR) else []
+        guide_files = [f for f in os.listdir(GUIDES_DIR) if f.endswith('.json')] if os.path.exists(GUIDES_DIR) else []
+
+        stats['attraction_files'] = len(attraction_files)
+        stats['guide_files'] = len(guide_files)
+        stats['cities_covered'] = stats_cities
+
+        return jsonify(stats)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 def get_places(city, keywords='景点'):
     try:
         cache_key = f"{city}_{keywords}"
@@ -333,18 +724,19 @@ def generate_plan():
             return jsonify({'error': '最多支持15天的行程规划'}), 400
 
         is_province = destination in provinces_data
-        
+
         if is_province:
             province_cities = provinces_data[destination]
             selected_cities = province_cities[:min(days_num, len(province_cities))]
-            
+
             if len(selected_cities) < days_num:
                 repeat_cities = []
                 while len(selected_cities) + len(repeat_cities) < days_num:
                     repeat_cities.extend(selected_cities)
                 selected_cities.extend(repeat_cities[:days_num - len(selected_cities)])
-            
+
             all_places = {}
+            # 🔍 并行获取：高德API + 爬虫数据
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_city = {executor.submit(get_places, city): city for city in selected_cities}
                 for future in as_completed(future_to_city):
@@ -355,15 +747,24 @@ def generate_plan():
                             all_places[city] = places[:6]
                     except Exception as e:
                         logger.warning(f"获取{city}景点失败: {e}")
-            
+
+            # 🔑 从真实知识库获取数据（多源验证）
+            provider = get_provider_with_llm()
+            real_data_parts = []
+            for city in selected_cities[:3]:
+                if provider.has_knowledge(city):
+                    data_prompt = provider.format_for_llm(city, days, preference)
+                    real_data_parts.append(data_prompt)
+            real_data_section = "\n\n".join(real_data_parts) if real_data_parts else ""
+
             places_info = ""
             if all_places:
                 for city, places in all_places.items():
                     places_info += f"{city}：{', '.join(places)}\n"
-            
+
             prompt = f"请为我设计一份{destination}{days}日游旅行计划，涵盖以下城市：{', '.join(selected_cities)}。\n"
             if places_info:
-                prompt += f"\n各城市推荐景点：\n{places_info}\n"
+                prompt += f"\n各城市推荐景点（高德地图）：\n{places_info}\n"
             prompt += f"\n要求：\n\n"
             prompt += f"1. 将行程合理分配到{days}天，每天去不同的城市或地区\n"
             prompt += f"2. 每天详细的时间安排（以休闲为主，08:00后出发）\n"
@@ -373,17 +774,40 @@ def generate_plan():
             prompt += f"6. 每天的预算估算\n"
             prompt += f"7. 每个城市的住宿推荐\n"
             prompt += f"8. 实用的旅行小贴士\n"
-            
+
             if preference:
                 prompt += f"\n特别偏好：{preference}\n"
 
             prompt += "\n请直接输出HTML内容片段（不要包含<html><head><body>标签），使用<h2>-<h4>、<p>、<ul><li>、<strong>等标签。"
+
+            # 🔑 注入真实爬取数据（放在最后以起到最高优先级）
+            if real_data_section:
+                prompt += "\n\n" + real_data_section
         else:
             places = get_places(destination)
-            
+
+            # 🔑 从真实知识库获取数据
+            provider = get_provider_with_llm()
+            real_data_prompt = ""
+            real_data_attractions = []
+
+            if provider.has_knowledge(destination):
+                real_data_prompt = provider.format_for_llm(destination, days, preference)
+                kb = provider.get_city_knowledge(destination)
+                if kb:
+                    for a in kb.get("attractions", []):
+                        real_data_attractions.append(a.get("name", ""))
+
+            # 合并景点列表（高德API + 真实知识库）
+            all_attraction_names = list(places) if places else []
+            for name in real_data_attractions:
+                if name and name not in all_attraction_names:
+                    all_attraction_names.append(name)
+            all_attraction_names = all_attraction_names[:15]
+
             attractions_str = ""
-            if places:
-                attractions_str = f"（推荐景点：{', '.join(places[:8])}）"
+            if all_attraction_names:
+                attractions_str = f"（推荐景点：{', '.join(all_attraction_names[:8])}）"
 
             prompt = f"请为我设计一份{destination}{days}日游旅行计划{attractions_str}。要求：\n\n"
             prompt += f"1. 每天详细的时间安排（以休闲为主，08:00后出发），每天去不同的景点\n"
@@ -393,11 +817,15 @@ def generate_plan():
             prompt += f"5. 每天的预算估算\n"
             prompt += f"6. 住宿推荐\n"
             prompt += f"7. 实用的旅行小贴士\n"
-            
+
             if preference:
                 prompt += f"\n特别偏好：{preference}\n"
 
             prompt += "\n请直接输出HTML内容片段（不要包含<html><head><body>标签），使用<h2>-<h4>、<p>、<ul><li>、<strong>等标签。"
+
+            # 🔑 注入真实数据（放在最后以起到最高优先级）
+            if real_data_prompt:
+                prompt += "\n\n" + real_data_prompt
 
         logger.info(f"开始生成攻略: {destination}, {days}天")
         plan_content = generate_plan_with_retry(prompt)

@@ -1,10 +1,11 @@
-# 🌍 旅游顾问小助手
+# 🌍 智能旅游顾问
 
-一款基于 Flask 和 AI 的智能旅游行程规划助手，支持输入目的地和游玩天数生成个性化旅游攻略，包含天气查询、地图查看等功能。
+一款基于 Flask + Crawl4AI + AI 的智能旅游行程规划助手，**支持从马蜂窝、携程等真实旅游网站爬取数据**，生成更准确的个性化旅游攻略。
 
 ## ✨ 功能特色
 
 - 📝 **智能攻略生成**：输入目的地和天数，AI 自动生成详细的旅游攻略
+- 🕸️ **真实数据爬取**：基于 Crawl4AI 从马蜂窝、携程自动采集景点、攻略、美食数据
 - 🏙️ **多城市规划**：支持省份级别的多城市行程规划（如云南、四川等）
 - 🌤️ **天气查询**：查询目的地未来7天天气预报
 - 🗺️ **地图查看**：搜索地点，查看周边景点、美食、酒店
@@ -15,6 +16,7 @@
 
 - **后端框架**：Flask 3.1.3
 - **AI模型**：Kimi (kimi-k2.7-code-highspeed)
+- **爬虫引擎**：Crawl4AI 0.9.2 + Playwright（支持JS渲染）
 - **地图服务**：高德地图API
 - **天气服务**：Open-Meteo API
 - **前端**：HTML5 + CSS3 + JavaScript
@@ -23,11 +25,109 @@
 
 ```
 实验1/
-├── app.py                 # Flask后端应用
+├── app.py                      # Flask后端应用（含爬虫集成）
+├── preload_data.py             # 数据预加载脚本
+├── scraper/                    # 🆕 爬虫模块
+│   ├── __init__.py             # 模块入口
+│   ├── config.py               # 配置文件（目标网站、UA等）
+│   ├── base_crawler.py         # 基于Crawl4AI的基础爬虫
+│   ├── mafengwo_crawler.py     # 马蜂窝爬虫（攻略、景点）
+│   ├── ctrip_crawler.py        # 携程爬虫（景点排名、门票）
+│   ├── travel_data_store.py    # 数据存储与索引
+│   └── data_enricher.py        # 数据增强器（整合多源数据）
+├── travel_data/                # 🆕 爬取数据存储
+│   ├── attractions/            # 景点数据JSON
+│   ├── guides/                 # 攻略数据JSON
+│   └── cache/                  # 爬取缓存
 ├── templates/
-│   └── travel_assistant.html  # 前端页面
-├── travel_env/            # Python虚拟环境
-└── README.md              # 项目说明文档
+│   └── travel_assistant.html   # 前端页面（含数据采集面板）
+├── travel_env/                 # Python虚拟环境
+└── README.md                   # 项目说明文档
+```
+
+## 🚀 快速开始
+
+### 环境要求
+
+- Python 3.10+
+- 已安装依赖（Flask、Crawl4AI、Playwright等）
+
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
+
+# 安装 Playwright 浏览器（Crawl4AI依赖）
+python -m playwright install chromium
+```
+
+### 2. 预加载数据（推荐）
+
+```bash
+# 启动前预爬取热门城市数据
+python preload_data.py
+```
+
+### 3. 启动应用
+
+```bash
+# Windows（使用虚拟环境）
+travel_env\python.exe app.py
+
+# 或
+python app.py
+```
+
+### 4. 访问应用
+
+打开浏览器访问：http://127.0.0.1:5000
+
+## 🕸️ 数据采集指南
+
+### 采集流程
+
+1. 在「数据采集」标签页输入城市名称
+2. 点击「采集数据」，系统自动从以下网站获取数据：
+   - **马蜂窝**：攻略、景点、美食推荐
+   - **携程**：景点排名、门票价格、用户评分
+3. 数据自动缓存到 `travel_data/` 目录
+4. 生成攻略时自动注入真实数据
+
+### 数据来源
+
+| 网站 | 采集内容 | 缓存时间 |
+|------|----------|----------|
+| 马蜂窝 | 攻略、景点介绍、美食 | 3-7天 |
+| 携程 | 景点排名、门票、评分 | 1-7天 |
+| 高德地图 | POI坐标、周边搜索 | 1小时 |
+
+### 手动触发采集
+
+浏览器中进入「数据采集」→ 输入城市 → 点击「采集数据」
+
+### API 触发
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/enrich_city \
+  -H "Content-Type: application/json" \
+  -d '{"city": "成都", "force_refresh": false}'
+```
+
+## 🔌 API 接口
+
+| 接口 | 方法 | 说明 |
+|------|------|------|
+| `/` | GET | 首页 |
+| `/api/generate_plan` | POST | 生成旅游攻略（含真实数据） |
+| `/api/weather` | GET | 查询天气 |
+| `/api/search_places` | GET | 搜索景点 |
+| `/api/geocode` | GET | 地理编码 |
+| `/api/place_detail` | GET | 地点详情 |
+| `/api/search_around` | GET | 周边搜索 |
+| `/api/enrich_city` | POST | 🆕 为城市采集旅游数据 |
+| `/api/get_city_data` | GET | 🆕 获取已采集的城市数据 |
+| `/api/crawl_url` | POST | 🆕 爬取任意URL |
+| `/api/data_stats` | GET | 🆕 数据统计 |
 ```
 
 ## 🚀 快速开始
