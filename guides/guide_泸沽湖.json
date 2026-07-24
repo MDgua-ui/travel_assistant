@@ -1,0 +1,58 @@
+{
+  "city": "泸沽湖",
+  "food_recommendations": [
+    {
+      "name": "野生菌火锅",
+      "cuisine": "云南特色",
+      "price": "未知",
+      "description": "云南特色美食之一。"
+    },
+    {
+      "name": "大理土八碗",
+      "cuisine": "白族菜",
+      "price": "未知",
+      "description": "大理传统宴席菜。"
+    },
+    {
+      "name": "纳西火塘鸡",
+      "cuisine": "纳西族特色",
+      "price": "未知",
+      "description": "丽江地区特色美食。"
+    },
+    {
+      "name": "云南特色小吃",
+      "cuisine": "小吃",
+      "price": "未知",
+      "description": "泛指云南各地风味小吃。"
+    },
+    {
+      "name": "乳扇",
+      "cuisine": "大理小吃",
+      "price": "未知",
+      "description": "大理古城常见特色奶制品。"
+    },
+    {
+      "name": "烤饵块",
+      "cuisine": "大理小吃",
+      "price": "未知",
+      "description": "大理街头传统烤食。"
+    },
+    {
+      "name": "鲜奶米布",
+      "cuisine": "甜品",
+      "price": "未知",
+      "description": "大理古城特色甜品。"
+    },
+    {
+      "name": "风花雪月啤酒",
+      "cuisine": "饮品",
+      "price": "未知",
+      "description": "大理本地特色啤酒。"
+    }
+  ],
+  "tips": "云南景点分散，交通和路线安排麻烦，建议提前联系当地导游免费规划；提前预定酒店和门票更省心；游玩满意后再付尾款；不要贪便宜参加几百元的低价团，吃饭和交通是主要坑点。",
+  "source": "web_crawl:https://lvy111.hngdly.top/aeryaiqxpmlk/14083.html?",
+  "page_title": "äºåææ¸¸æ»ç¥",
+  "url": "https://lvy111.hngdly.top/aeryaiqxpmlk/14083.html?source=baidu&plan=%E5%9C%B0%E5%90%8D%E8%AF%8D&unit=%E5%87%A0%E6%97%A5&keyword=5%E5%A4%A9%E5%A4%A7%E7%90%86%E6%97%85%E6%B8%B8&e_matchtype=2&e_creative=118194479649&e_adposition=cl1&e_pagenum=1&e_keywordid=1101413482869&bd_vid=2323549049762725969&kf_uid=177913&kf_n=xiaomi",
+  "saved_at": "2026-07-24T12:46:05.125538"
+}

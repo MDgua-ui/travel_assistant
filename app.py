@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, render_template
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
+from dotenv import load_dotenv
 import os
 import sys
 import requests
@@ -8,6 +9,9 @@ import json
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# 加载 .env 环境变量
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env'))
 
 # 爬虫模块
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -50,8 +54,8 @@ def get_provider_with_llm():
 
 llm = ChatOpenAI(
     model="kimi-k2.7-code-highspeed",
-    api_key="sk-y26L4uFq1QLSNBn2Ksts0JjP3Fno5ivh0jIN2f0jZTr1O0cB",
-    base_url="https://tokenhub.tencentmaas.com/v1",
+    api_key=os.environ.get("KIMI_API_KEY", ""),
+    base_url=os.environ.get("KIMI_BASE_URL", "https://tokenhub.tencentmaas.com/v1"),
     temperature=1,
     max_tokens=15000,
 )
@@ -98,10 +102,10 @@ def index():
 
 
 
-QWEATHER_API_KEY = "38554c1b2d74235ca5c8b5a1f839adeb"
+QWEATHER_API_KEY = os.environ.get("QWEATHER_API_KEY", "")
 QWEATHER_API_HOST = ""
 
-AMAP_KEY = "1ee93aec7338f278ad571853c5cfcb55"
+AMAP_KEY = os.environ.get("AMAP_KEY", "")
 
 @app.route('/api/weather', methods=['GET'])
 def get_weather():
